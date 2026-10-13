@@ -1,0 +1,7 @@
+{
+  "id": "p070",
+  "title": "Sign outgoing webhooks",
+  "durationSec": 35,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
