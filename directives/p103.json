@@ -1,0 +1,9 @@
+{
+  "id": "p103",
+  "title": "Shorten the session timeout",
+  "durationSec": 38,
+  "outcome": "pass",
+  "breaksWith": [
+    "p094"
+  ]
+}
