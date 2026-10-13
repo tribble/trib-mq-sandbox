@@ -1,6 +1,6 @@
 {
   "id": "smoke-flake",
-  "title": "Smoke: flakes half the time after 60 seconds",
+  "title": "Smoke: flakes half the time after 60 seconds (v2)",
   "durationSec": 60,
   "outcome": "flake",
   "flakeRate": 0.5
