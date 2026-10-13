@@ -1,0 +1,7 @@
+{
+  "id": "smoke-flake",
+  "title": "Smoke: flakes half the time after 60 seconds",
+  "durationSec": 60,
+  "outcome": "flake",
+  "flakeRate": 0.5
+}
