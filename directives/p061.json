@@ -1,0 +1,6 @@
+{
+  "id": "p061",
+  "title": "Extract the auth middleware",
+  "durationSec": 35,
+  "outcome": "pass"
+}
