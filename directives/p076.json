@@ -1,0 +1,9 @@
+{
+  "id": "p076",
+  "title": "Improve keyboard navigation",
+  "durationSec": 40,
+  "outcome": "pass",
+  "breaksWith": [
+    "p073"
+  ]
+}
