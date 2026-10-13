@@ -1,0 +1,7 @@
+{
+  "id": "p068",
+  "title": "Fix stale cache after profile edits",
+  "durationSec": 43,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
