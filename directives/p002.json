@@ -1,0 +1,10 @@
+{
+  "id": "p002",
+  "title": "Send a weekly email digest",
+  "durationSec": 30,
+  "outcome": "flake",
+  "flakeRate": 0.3,
+  "breaksWith": [
+    "p001"
+  ]
+}
