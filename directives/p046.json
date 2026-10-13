@@ -1,0 +1,7 @@
+{
+  "id": "p046",
+  "title": "Bump Node to the current LTS",
+  "durationSec": 48,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
