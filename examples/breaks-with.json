@@ -1,0 +1,7 @@
+{
+  "id": "breaks-with",
+  "title": "Passes alone, breaks with pass",
+  "durationSec": 25,
+  "outcome": "pass",
+  "breaksWith": ["pass"]
+}

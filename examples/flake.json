@@ -1,0 +1,7 @@
+{
+  "id": "flake",
+  "title": "Fails 30% of runs after 45 seconds",
+  "durationSec": 45,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}

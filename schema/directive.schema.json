@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sandbox CI directive",
+  "description": "A behaviour directive stored as directives/<id>.json. Documentation only: runner/rules.mjs validates by hand. Rules the schema cannot express: id must equal the filename stem; breaksWith must not list the directive's own id; setting flakeRate with an outcome other than flake is a warning; unknown keys are warnings, not errors.",
+  "type": "object",
+  "required": ["id", "title", "durationSec", "outcome"],
+  "properties": {
+    "id": {
+      "description": "Directive id. Must equal the filename stem (directives/<id>.json).",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "title": {
+      "description": "Human-readable title shown in logs and the job summary.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "durationSec": {
+      "description": "Simulated duration in seconds. The run time is the max over the active directives.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 600
+    },
+    "outcome": {
+      "description": "pass, fail (fails at durationSec) or flake (fails at durationSec with probability flakeRate, re-rolled on every run).",
+      "enum": ["pass", "fail", "flake"]
+    },
+    "flakeRate": {
+      "description": "Probability of failing, in (0, 1]. Required when outcome is flake; a warning with any other outcome.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "breaksWith": {
+      "description": "Ids this directive breaks with. Symmetric: either side may declare it. The pair fails when both are present and at least one is active. Ids that do not exist are inert.",
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+      },
+      "default": []
+    },
+    "conflictKey": {
+      "description": "Names the file conflicts/<conflictKey>.txt that the PR also edits. Validated only; the merge conflict itself comes from that file.",
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,32}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "flake" } },
+        "required": ["outcome"]
+      },
+      "then": { "required": ["flakeRate"] }
+    }
+  ]
+}
