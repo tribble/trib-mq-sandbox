@@ -1,0 +1,6 @@
+{
+  "id": "p002",
+  "title": "Rate-limit login attempts",
+  "durationSec": 30,
+  "outcome": "pass"
+}
