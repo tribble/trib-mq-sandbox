@@ -1,0 +1,7 @@
+{
+  "id": "p079",
+  "title": "Let users rotate API keys",
+  "durationSec": 56,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
