@@ -1,0 +1,7 @@
+{
+  "id": "p036",
+  "title": "Add caching to search",
+  "durationSec": 26,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
