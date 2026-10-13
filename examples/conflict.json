@@ -1,0 +1,7 @@
+{
+  "id": "conflict",
+  "title": "Passes after 10 seconds (conflict key demo)",
+  "durationSec": 10,
+  "outcome": "pass",
+  "conflictKey": "demo"
+}

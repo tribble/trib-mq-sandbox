@@ -1,0 +1,6 @@
+{
+  "id": "pass",
+  "title": "Passes after 20 seconds",
+  "durationSec": 20,
+  "outcome": "pass"
+}

@@ -1,0 +1,6 @@
+{
+  "id": "fail",
+  "title": "Fails after 15 seconds",
+  "durationSec": 15,
+  "outcome": "fail"
+}

@@ -1,0 +1,21 @@
+name: ci
+on:
+  push: { branches: ['mq/**'] }
+  pull_request:
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency:
+  # A pending run in a shared group is always cancelled, so queue runs get a unique group (run_id).
+  # Only PR runs share a group, and they cancel stale ones.
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0, persist-credentials: false }
+      - run: node --test runner/*.test.mjs
+      - run: node runner/run.mjs --base "origin/${{ github.base_ref || 'main' }}" ${{ github.event_name == 'pull_request' && '--max-seconds 5' || '' }}
