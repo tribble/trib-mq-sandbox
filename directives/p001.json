@@ -1,0 +1,7 @@
+{
+  "id": "p001",
+  "title": "Shorten the session timeout",
+  "durationSec": 20,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
