@@ -1,0 +1,6 @@
+{
+  "id": "p026",
+  "title": "Fix stale cache after profile edits",
+  "durationSec": 53,
+  "outcome": "pass"
+}
