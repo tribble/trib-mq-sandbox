@@ -1,0 +1,9 @@
+{
+  "id": "p140",
+  "title": "Add a copy-link button",
+  "durationSec": 40,
+  "outcome": "pass",
+  "breaksWith": [
+    "p137"
+  ]
+}
