@@ -1,0 +1,7 @@
+{
+  "id": "p155",
+  "title": "Record admin actions in an audit log",
+  "durationSec": 35,
+  "outcome": "pass",
+  "conflictKey": "cfg"
+}
