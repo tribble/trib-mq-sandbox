@@ -1,0 +1,9 @@
+{
+  "id": "p172",
+  "title": "Bump Node to the current LTS",
+  "durationSec": 38,
+  "outcome": "pass",
+  "breaksWith": [
+    "p163"
+  ]
+}
