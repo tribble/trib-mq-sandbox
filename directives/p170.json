@@ -1,0 +1,7 @@
+{
+  "id": "p170",
+  "title": "Send a weekly email digest",
+  "durationSec": 34,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
