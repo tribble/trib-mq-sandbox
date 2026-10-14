@@ -1,0 +1,7 @@
+{
+  "id": "p143",
+  "title": "Trim the client bundle",
+  "durationSec": 56,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
