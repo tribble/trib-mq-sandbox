@@ -1,0 +1,7 @@
+{
+  "id": "p196",
+  "title": "Bump Node to the current LTS",
+  "durationSec": 60,
+  "outcome": "flake",
+  "flakeRate": 0.4
+}
