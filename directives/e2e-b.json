@@ -1,0 +1,6 @@
+{
+  "id": "e2e-b",
+  "title": "E2E manual check e2e-b (passes after 20s)",
+  "durationSec": 20,
+  "outcome": "pass"
+}
