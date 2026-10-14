@@ -116,7 +116,15 @@ PRs conflict with each other:
   Only top-level `directives/*.json` files count; nested directories and other files are ignored.
   Everything is read from the `HEAD` commit, never the working tree, so a local dry-run sees
   exactly what CI sees. Uncommitted changes are invisible.
-- **Run time** is the longest `durationSec` among the active directives.
+- **Run time** is the longest `durationSec` among the active directives, times the duration factor.
+- **Duration factor.** Each run draws one factor, uniform over 0.50, 0.51, ..., 1.00, and every
+  directive time (the run time, the failure times below and the `At` column) is multiplied by it,
+  so a run takes between half and all of its declared time. That lets a later batch that is up to
+  twice as long finish before the batch ahead of it.
+  One factor scales every time equally, so the outcome, which directive fails first and the
+  tie-breaks are unchanged. The factor comes from the same seed as the flake rolls (below) but
+  from a separate generator, so the rolls do not depend on it. It is printed as
+  `Duration factor:` in the log, the dry-run output and the job summary.
 - **Fail fast.** A `fail` directive fails at its `durationSec`, and the run stops at the earliest
   failure. Two failures at the same second are decided by id (alphabetical), and the loser is
   reported as `not reached`. Directives due after the failure are `not reached` too.
@@ -124,7 +132,7 @@ PRs conflict with each other:
   order, and fails at its `durationSec` if the roll is below `flakeRate`. The rolls come from a
   seeded PRNG (mulberry32). In CI the seed is FNV-1a of `"<GITHUB_RUN_ID>:<GITHUB_RUN_ATTEMPT>"`,
   so a re-run (a new attempt) re-rolls, while the same attempt always reproduces. The seed is
-  logged, and `--seed` replays it locally.
+  logged, and `--seed` replays it (rolls and duration factor) locally.
 - **breaksWith is symmetric.** A pair `{a, b}` declared by either side fails when **both** files
   are present in the tree **and at least one is active**. It fails at the longest duration among
   its active members, and each active member reports `broke with <partner>`. So a pair of two
@@ -151,8 +159,10 @@ The results table has one row per active directive:
 | `broke with <id>` | a member of the `breaksWith` pair that ended the run |
 | `not reached` | due after the run ended, or its own failure lost the tie-break |
 
-The `At` column is the simulated second the row finished. The runner exits 0 when the run passes,
-1 when it fails (or the setup is broken, for example no merge-base), and 2 for bad arguments.
+The `At` column is the simulated second the row finished, after the duration factor; the `Spec`
+column shows the declared `durationSec`. The runner exits 0 when the run passes, 1 when it fails
+(or the setup is broken, for example no merge-base), 2 for bad arguments, and 130 or 143 when it is
+cancelled (see the workflow section).
 
 ### Edge cases
 
@@ -177,6 +187,13 @@ The `At` column is the simulated second the row finished. The runner exits 0 whe
 - **Concurrency:** queue runs never cancel each other, because each run gets its own group
   (`run-<run_id>`). PR runs share one group per PR (`pr-<number>`) with `cancel-in-progress`, so a
   new push to a PR cancels its stale run.
+- **Cancellation:** to cancel a run, the Actions runner sends SIGINT, then SIGTERM, to the step's
+  process only. The runner step starts with `exec`, so that process is node itself rather than
+  bash, which would hold back SIGINT until node finished and, on SIGTERM, exit and leave node
+  sleeping as an orphan. On either signal the runner prints
+  `Run cancelled (SIGINT) at t=<s> of <s>; exiting without a result.`, writes no job summary and
+  exits at once with 130 (SIGINT) or 143 (SIGTERM). GitHub itself takes a while to pass a cancel
+  on to the runner (about 28 seconds when we measured it).
 - The checkout uses `fetch-depth: 0` because the runner needs history to find the merge-base.
 
 ## Local usage
@@ -196,9 +213,9 @@ node runner/run.mjs [--base origin/main] [--dry-run] [--seed N] [--time-scale 1]
 - `--base <ref>`: the branch to compare against (default `origin/main`).
 - `--dry-run`: print the results table and exit by the outcome, without sleeping or writing a job
   summary.
-- `--seed <0..4294967295>`: fix the flake rolls. Without it the seed comes from `GITHUB_RUN_ID` and
-  `GITHUB_RUN_ATTEMPT`, or is random outside Actions. Every run prints a `Reproduce:` line with the
-  seed it used.
+- `--seed <0..4294967295>`: fix the flake rolls and the duration factor. Without it the seed comes
+  from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`, or is random outside Actions. Every run prints a
+  `Reproduce:` line with the seed it used.
 - `--time-scale <x>`: real seconds per simulated second (default 1; `0` means don't sleep).
 - `--max-seconds <n>`: cap the sleep at n simulated seconds. The run then says
   `sleep capped at <n>s; outcome unchanged`.
@@ -219,22 +236,24 @@ node runner/run.mjs --dry-run --base main --seed 7
 ```
 Base: main
 Seed: 7 (from --seed)
+Duration factor: 0.76 (from the seed; scales every durationSec)
 Active directives: 5 (breaks-with, conflict, fail, flake, pass)
 
 Directive    Title                                        Spec                      Result       At
------------  -------------------------------------------  ------------------------  -----------  ---
+-----------  -------------------------------------------  ------------------------  -----------  -----
 breaks-with  Passes alone, breaks with pass               pass 25s breaksWith pass  not reached  -
-conflict     Passes after 10 seconds (conflict key demo)  pass 10s conflict demo    passed       10s
-fail         Fails after 15 seconds                       fail 15s                  failed       15s
+conflict     Passes after 10 seconds (conflict key demo)  pass 10s conflict demo    passed       7.6s
+fail         Fails after 15 seconds                       fail 15s                  failed       11.4s
 flake        Fails 30% of runs after 45 seconds           flake 30% 45s             not reached  -
 pass         Passes after 20 seconds                      pass 20s                  not reached  -
 
-Result: FAIL - fail failed at t=15s (run time 45s)
+Result: FAIL - fail failed at t=11.4s (run time 34.2s)
 0 inert directives on main
 Reproduce: node runner/run.mjs --dry-run --base main --seed 7
 ```
 
-The `fail` directive stops the run at 15s. Drop it and the `breaksWith` pair fails next:
+The `fail` directive stops the run at 11.4s (its 15s times the factor 0.76). Drop it and the
+`breaksWith` pair fails next:
 
 ```sh
 git rm -q directives/fail.json
@@ -245,16 +264,17 @@ node runner/run.mjs --dry-run --base main --seed 7
 ```
 Base: main
 Seed: 7 (from --seed)
+Duration factor: 0.76 (from the seed; scales every durationSec)
 Active directives: 4 (breaks-with, conflict, flake, pass)
 
 Directive    Title                                        Spec                      Result                  At
------------  -------------------------------------------  ------------------------  ----------------------  ---
-breaks-with  Passes alone, breaks with pass               pass 25s breaksWith pass  broke with pass         25s
-conflict     Passes after 10 seconds (conflict key demo)  pass 10s conflict demo    passed                  10s
+-----------  -------------------------------------------  ------------------------  ----------------------  ----
+breaks-with  Passes alone, breaks with pass               pass 25s breaksWith pass  broke with pass         19s
+conflict     Passes after 10 seconds (conflict key demo)  pass 10s conflict demo    passed                  7.6s
 flake        Fails 30% of runs after 45 seconds           flake 30% 45s             not reached             -
-pass         Passes after 20 seconds                      pass 20s                  broke with breaks-with  25s
+pass         Passes after 20 seconds                      pass 20s                  broke with breaks-with  19s
 
-Result: FAIL - breaks-with broke with pass; pass broke with breaks-with at t=25s (run time 45s)
+Result: FAIL - breaks-with broke with pass; pass broke with breaks-with at t=19s (run time 34.2s)
 0 inert directives on main
 Reproduce: node runner/run.mjs --dry-run --base main --seed 7
 ```
@@ -271,15 +291,16 @@ node runner/run.mjs --dry-run --base main --seed 7
 ```
 Base: main
 Seed: 7 (from --seed)
+Duration factor: 0.76 (from the seed; scales every durationSec)
 Active directives: 3 (conflict, flake, pass)
 
 Directive  Title                                        Spec                    Result                     At
----------  -------------------------------------------  ----------------------  -------------------------  ---
-conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                     10s
-flake      Fails 30% of runs after 45 seconds           flake 30% 45s           flaked (roll 0.01 < 0.30)  45s
-pass       Passes after 20 seconds                      pass 20s                passed                     20s
+---------  -------------------------------------------  ----------------------  -------------------------  -----
+conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                     7.6s
+flake      Fails 30% of runs after 45 seconds           flake 30% 45s           flaked (roll 0.01 < 0.30)  34.2s
+pass       Passes after 20 seconds                      pass 20s                passed                     15.2s
 
-Result: FAIL - flake flaked (roll 0.01 < 0.30) at t=45s (run time 45s)
+Result: FAIL - flake flaked (roll 0.01 < 0.30) at t=34.2s (run time 34.2s)
 0 inert directives on main
 Reproduce: node runner/run.mjs --dry-run --base main --seed 7
 ```
@@ -291,15 +312,16 @@ node runner/run.mjs --dry-run --base main --seed 1
 ```
 Base: main
 Seed: 1 (from --seed)
+Duration factor: 0.77 (from the seed; scales every durationSec)
 Active directives: 3 (conflict, flake, pass)
 
 Directive  Title                                        Spec                    Result                      At
----------  -------------------------------------------  ----------------------  --------------------------  ---
-conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                      10s
-flake      Fails 30% of runs after 45 seconds           flake 30% 45s           passed (roll 0.63 >= 0.30)  45s
-pass       Passes after 20 seconds                      pass 20s                passed                      20s
+---------  -------------------------------------------  ----------------------  --------------------------  -----
+conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                      7.7s
+flake      Fails 30% of runs after 45 seconds           flake 30% 45s           passed (roll 0.63 >= 0.30)  34.6s
+pass       Passes after 20 seconds                      pass 20s                passed                      15.4s
 
-Result: PASS at t=45s
+Result: PASS at t=34.6s
 0 inert directives on main
 Reproduce: node runner/run.mjs --dry-run --base main --seed 1
 ```
@@ -311,7 +333,7 @@ through `breaksWith`), so on a clone where main already has directives that line
 
 Without `--dry-run` the runner sleeps until the outcome is due, logging a heartbeat at least every
 10 real seconds, and appends a Markdown summary to `$GITHUB_STEP_SUMMARY` when that is set.
-`--time-scale 0.1` makes 45 simulated seconds take 4.5 real seconds:
+`--time-scale 0.1` makes each simulated second take 0.1 real seconds:
 
 ```sh
 node runner/run.mjs --base main --seed 1 --time-scale 0.1
@@ -321,19 +343,29 @@ node runner/run.mjs --base main --seed 1 --time-scale 0.1
 Base: main
 Merge-base: <sha of main>
 Seed: 1 (from --seed)
+Duration factor: 0.77 (from the seed; scales every durationSec)
 Active directives: 3 (conflict, flake, pass)
-Simulating 45s at time scale 0.1 (4.5s real)
-t=45s of 45s
+Simulating 34.6s at time scale 0.1 (3.5s real)
+t=34.6s of 34.6s
 
 Directive  Title                                        Spec                    Result                      At
----------  -------------------------------------------  ----------------------  --------------------------  ---
-conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                      10s
-flake      Fails 30% of runs after 45 seconds           flake 30% 45s           passed (roll 0.63 >= 0.30)  45s
-pass       Passes after 20 seconds                      pass 20s                passed                      20s
+---------  -------------------------------------------  ----------------------  --------------------------  -----
+conflict   Passes after 10 seconds (conflict key demo)  pass 10s conflict demo  passed                      7.7s
+flake      Fails 30% of runs after 45 seconds           flake 30% 45s           passed (roll 0.63 >= 0.30)  34.6s
+pass       Passes after 20 seconds                      pass 20s                passed                      15.4s
 
-Result: PASS at t=45s
+Result: PASS at t=34.6s
 0 inert directives on main
 Reproduce: node runner/run.mjs --dry-run --base main --seed 1
+```
+
+Ctrl-C (SIGINT) or SIGTERM during the sleep stops the run at once with exit code 130 or 143, and
+no job summary is written. For the same command without `--time-scale`, stopped after 5 seconds,
+the log ends with:
+
+```
+Simulating 34.6s at time scale 1 (34.6s real)
+Run cancelled (SIGINT) at t=4.9s of 34.6s; exiting without a result.
 ```
 
 When you are done: `git switch main && git branch -D scratch`.
@@ -362,7 +394,7 @@ When you are done: `git switch main && git branch -D scratch`.
 - [x] 6. Install App #2 (`trib-mq-demo`), the demo bot, and do **not** add it to the bypass list.
 - [ ] 7. Smoke test: open a PR that copies `examples/fail.json` into `directives/`. Its PR check
   should fail quickly (the sleep is capped at 5s). Then enqueue it (`mq:queue` label) and check
-  that the `mq/line` run fails at about `durationSec` (15s) plus ~15s of runner startup, and that
-  the queue ejects the PR.
+  that the `mq/line` run fails at about `durationSec` times the duration factor (7.5-15s) plus ~15s
+  of runner startup, and that the queue ejects the PR.
 - [ ] 8. From then on, sandbox changes (including changes to this runner and the workflow) go
   through the queue.

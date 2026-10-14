@@ -40,7 +40,8 @@
  * @typedef {object} Evaluation
  * @property {boolean} ok
  * @property {number} endsAt    virtual second the run ends (the failure, or runTime)
- * @property {number} runTime   max durationSec of the active directives
+ * @property {number} runTime   max durationSec of the active directives (times the duration factor,
+ *                              once applyDurationFactor has scaled the evaluation)
  * @property {Failure | null} failure
  * @property {Row[]} rows       one per active directive, sorted by id
  * @property {string} [note]
@@ -284,6 +285,59 @@ export function seedFromRun(runId, runAttempt) {
   return fnv1a(`${runId}:${runAttempt}`);
 }
 
+// The duration factor is a whole number of hundredths, so the printed factor is exactly the one used.
+const FACTOR_MIN_HUNDREDTHS = 50;
+const FACTOR_MAX_HUNDREDTHS = 100;
+
+/**
+ * The run's duration factor: every directive takes durationSec x factor. It is uniform over
+ * 0.50, 0.51, ..., 1.00 and comes from the same seed as the flake rolls, but from a separate
+ * generator, so the flake rolls are the same as they would be without it.
+ * @param {number} seed uint32
+ * @returns {number}
+ */
+export function durationFactor(seed) {
+  const draw = mulberry32(fnv1a(`duration-factor:${seed}`))();
+  const choices = FACTOR_MAX_HUNDREDTHS - FACTOR_MIN_HUNDREDTHS + 1;
+  return (FACTOR_MIN_HUNDREDTHS + Math.floor(draw * choices)) / 100;
+}
+
+/**
+ * A time on the scaled timeline. Whole seconds times a two-decimal factor has at most two decimals,
+ * so rounding to hundredths only removes floating-point noise.
+ * @param {number} seconds
+ * @param {number} factor
+ */
+export function scaleSeconds(seconds, factor) {
+  return Math.round(seconds * factor * 100) / 100;
+}
+
+/**
+ * The evaluation with every time multiplied by the duration factor. One factor keeps all times in
+ * the same order, so the outcome, the failure and its tie-breaks are exactly those of `evaluation`.
+ * @param {Evaluation} evaluation
+ * @param {number} factor
+ * @returns {Evaluation}
+ */
+export function applyDurationFactor(evaluation, factor) {
+  const scale = (/** @type {number} */ seconds) => scaleSeconds(seconds, factor);
+  return {
+    ...evaluation,
+    endsAt: scale(evaluation.endsAt),
+    runTime: scale(evaluation.runTime),
+    failure: evaluation.failure && { ...evaluation.failure, at: scale(evaluation.failure.at) },
+    rows: evaluation.rows.map((row) => ({ ...row, at: row.at === null ? null : scale(row.at) })),
+  };
+}
+
+/**
+ * Seconds for display, with at most one decimal: 45 -> "45s", 22.5 -> "22.5s".
+ * @param {number} seconds
+ */
+export function formatSeconds(seconds) {
+  return `${Number(seconds.toFixed(1))}s`;
+}
+
 /**
  * Human-readable rate: 0.3 -> "30%".
  * @param {number} rate
@@ -432,5 +486,5 @@ export function describeFailure(evaluation) {
     const row = rows.find((r) => r.id === id);
     return `${id} ${row ? row.result : failure.kind}`;
   });
-  return `${parts.join('; ')} at t=${failure.at}s`;
+  return `${parts.join('; ')} at t=${formatSeconds(failure.at)}`;
 }
