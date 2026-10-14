@@ -1,15 +1,16 @@
 // Integration tests: build throwaway git repos under the OS temp dir and spawn the real run.mjs.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { fnv1a } from './rules.mjs';
+import { durationFactor, fnv1a } from './rules.mjs';
 
 const RUN = fileURLToPath(new URL('./run.mjs', import.meta.url));
+const WORKFLOW = fileURLToPath(new URL('../.github/workflows/ci.yml', import.meta.url));
 const execFileAsync = promisify(execFile);
 
 /** @type {string} */
@@ -123,6 +124,43 @@ function runner(cwd, args, extraEnv = {}) {
 }
 
 /**
+ * Start a command that runs run.mjs, wait until the runner is sleeping, then send `signal` to the
+ * started process only (the Actions runner does the same on cancel) and wait for it to exit.
+ * @param {string} command
+ * @param {string[]} args
+ * @param {{ cwd: string, env: Record<string, string>, signal: NodeJS.Signals }} options
+ * @returns {Promise<{ code: number | null, stdout: string, stderr: string, msToExit: number }>}
+ */
+function signalDuringSleep(command, args, { cwd, env, signal }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, env: { ...baseEnv, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let scheduled = false;
+    let signalledAt = Number.NaN;
+    child.stdout.setEncoding('utf8').on('data', (chunk) => {
+      stdout += chunk;
+      if (!scheduled && /^Simulating /m.test(stdout)) {
+        scheduled = true;
+        setTimeout(() => {
+          signalledAt = Date.now();
+          child.kill(signal);
+        }, 300);
+      }
+    });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15_000);
+    child.on('error', reject);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, msToExit: Date.now() - signalledAt });
+    });
+  });
+}
+
+/**
  * The table row for a directive id in plain-text stdout.
  * @param {string} stdout
  * @param {string} id
@@ -131,9 +169,16 @@ function rowFor(stdout, id) {
   return stdout.split('\n').find((line) => line.startsWith(`${id} `));
 }
 
-const DRY = ['--dry-run', '--base', 'main', '--seed', '1'];
+// Seed 64 has a duration factor of exactly 1.00, so in the dry runs that use it every time equals the
+// declared durationSec. Other tests below use seeds with other factors.
+const UNIT_SEED = 64;
+const DRY = ['--dry-run', '--base', 'main', '--seed', String(UNIT_SEED)];
 
 describe('run.mjs', { concurrency: 8 }, () => {
+  test('the seed of the dry runs below has a duration factor of 1.00', () => {
+    assert.equal(durationFactor(UNIT_SEED), 1);
+  });
+
   test('an added directive is active', async () => {
     const repo = await makeRepo();
     await repo.branch('feature');
@@ -342,6 +387,13 @@ describe('run.mjs', { concurrency: 8 }, () => {
     assert.ok(withAttempt.stdout.includes(`Seed: ${fnv1a('555:3')} (from GITHUB_RUN_ID=555, GITHUB_RUN_ATTEMPT=3)`));
     assert.ok(noAttempt.stdout.includes(`Seed: ${fnv1a('555:1')} (from GITHUB_RUN_ID=555, GITHUB_RUN_ATTEMPT=1)`));
     assert.match(random.stdout, /^Seed: \d+ \(random\)$/m);
+    // The duration factor follows the seed, whatever its source.
+    const factorLine = (/** @type {number} */ seed) =>
+      `Duration factor: ${durationFactor(seed).toFixed(2)} (from the seed; scales every durationSec)`;
+    assert.ok(withAttempt.stdout.includes(factorLine(fnv1a('555:3'))), withAttempt.stdout);
+    assert.ok(noAttempt.stdout.includes(factorLine(fnv1a('555:1'))), noAttempt.stdout);
+    const randomSeed = Number(/^Seed: (\d+) \(random\)$/m.exec(random.stdout)?.[1]);
+    assert.ok(random.stdout.includes(factorLine(randomSeed)), random.stdout);
   });
 
   test('a non-dry run with --time-scale 0 appends the summary table', async () => {
@@ -353,19 +405,24 @@ describe('run.mjs', { concurrency: 8 }, () => {
       'directives/b-fail.json': directive('b-fail', { outcome: 'fail', durationSec: 30 }),
     });
     writeFileSync(repo.summary, '# Existing content\n');
+    // Seed 9 has a duration factor of 0.98.
     const { code, stdout } = await runner(repo.dir, ['--base', 'main', '--seed', '9', '--time-scale', '0'], {
       GITHUB_STEP_SUMMARY: repo.summary,
     });
     assert.equal(code, 1, stdout);
     assert.match(stdout, /^Merge-base: [0-9a-f]{40}$/m);
-    assert.match(stdout, /^::error title=Directive failed::b-fail failed at t=30s$/m);
+    assert.match(stdout, /^Duration factor: 0\.98 \(from the seed; scales every durationSec\)$/m);
+    assert.match(stdout, /^::error title=Directive failed::b-fail failed at t=29\.4s$/m);
     const md = readFileSync(repo.summary, 'utf8');
     assert.ok(md.startsWith('# Existing content\n'), 'summary is appended, not overwritten');
     assert.match(md, /^## Sandbox CI: fail$/m);
+    assert.match(md, /^b-fail failed at t=29\.4s \(run time 29\.4s\)\.$/m);
     assert.match(md, /^\| Directive \| Title \| Spec \| Result \| At \|$/m);
-    assert.match(md, /^\| a-pass \| Pipe \\\| in title \| pass 20s \| passed \| 20s \|$/m);
-    assert.match(md, /^\| b-fail \| Directive b-fail \| fail 30s \| failed \| 30s \|$/m);
+    // Spec keeps the declared durationSec; At is on the scaled timeline.
+    assert.match(md, /^\| a-pass \| Pipe \\\| in title \| pass 20s \| passed \| 19\.6s \|$/m);
+    assert.match(md, /^\| b-fail \| Directive b-fail \| fail 30s \| failed \| 29\.4s \|$/m);
     assert.match(md, /^- Seed: `9` \(from --seed\)$/m);
+    assert.match(md, /^- Duration factor: `0\.98` \(from the seed; scales every durationSec\)$/m);
     assert.match(md, /^- Base: `main`, merge-base `[0-9a-f]{40}`$/m);
     assert.match(md, /^1 inert directives on main$/m);
   });
@@ -386,23 +443,27 @@ describe('run.mjs', { concurrency: 8 }, () => {
     const repo = await makeRepo();
     await repo.branch('feature');
     await repo.commit('add', { 'directives/quick.json': directive('quick', { durationSec: 2 }) });
+    // Seed 1 has a duration factor of 0.77, so the 2s directive takes 1.54s.
     const { code, stdout } = await runner(repo.dir, ['--base', 'main', '--seed', '1', '--time-scale', '0.01']);
     assert.equal(code, 0, stdout);
-    assert.match(stdout, /^t=2s of 2s$/m);
-    assert.match(stdout, /^Result: PASS at t=2s$/m);
+    assert.match(stdout, /^Simulating 1\.5s at time scale 0\.01 /m);
+    assert.match(stdout, /^t=1\.5s of 1\.5s$/m);
+    assert.match(stdout, /^Result: PASS at t=1\.5s$/m);
   });
 
   test('--max-seconds caps the sleep and says so', async () => {
     const repo = await makeRepo();
     await repo.branch('feature');
     await repo.commit('add', { 'directives/long.json': directive('long', { outcome: 'fail', durationSec: 30 }) });
+    // Seed 1 has a duration factor of 0.77: the failure is due at 23.1s and the cap still applies.
     const args = ['--base', 'main', '--seed', '1', '--time-scale', '0', '--max-seconds', '5'];
     const { code, stdout } = await runner(repo.dir, args, { GITHUB_STEP_SUMMARY: repo.summary });
     assert.equal(code, 1, stdout);
-    assert.match(stdout, /sleep capped at 5s; outcome unchanged/);
+    assert.match(stdout, /^Simulating 5s at time scale 0 /m);
+    assert.match(stdout, /^sleep capped at 5s; outcome unchanged \(--max-seconds 5; the outcome is due at t=23\.1s\)$/m);
     const md = readFileSync(repo.summary, 'utf8');
     assert.match(md, /sleep capped at 5s; outcome unchanged/);
-    assert.match(md, /^\| long \| Directive long \| fail 30s \| failed \| 30s \|$/m);
+    assert.match(md, /^\| long \| Directive long \| fail 30s \| failed \| 23\.1s \|$/m);
   });
 
   test('--max-seconds above the run time does not add a cap note', async () => {
@@ -412,6 +473,71 @@ describe('run.mjs', { concurrency: 8 }, () => {
     const { code, stdout } = await runner(repo.dir, ['--base', 'main', '--time-scale', '0', '--max-seconds', '5']);
     assert.equal(code, 0, stdout);
     assert.doesNotMatch(stdout, /capped/);
+  });
+
+  test('the dry-run shows the duration factor and scales every time except the Spec column', async () => {
+    const repo = await makeRepo();
+    await repo.branch('feature');
+    await repo.commit('add', {
+      'directives/early-fail.json': directive('early-fail', { outcome: 'fail', durationSec: 15 }),
+      'directives/quick.json': directive('quick', { durationSec: 10 }),
+      'directives/slow.json': directive('slow', { durationSec: 20 }),
+    });
+    // Seed 7 has a duration factor of 0.76.
+    const { code, stdout } = await runner(repo.dir, ['--dry-run', '--base', 'main', '--seed', '7']);
+    assert.equal(code, 1, stdout);
+    assert.match(stdout, /^Seed: 7 \(from --seed\)\nDuration factor: 0\.76 \(from the seed; scales every durationSec\)$/m);
+    assert.match(rowFor(stdout, 'early-fail') ?? '', /fail 15s\s+failed\s+11\.4s$/);
+    assert.match(rowFor(stdout, 'quick') ?? '', /pass 10s\s+passed\s+7\.6s$/);
+    assert.match(rowFor(stdout, 'slow') ?? '', /pass 20s\s+not reached\s+-$/);
+    assert.match(stdout, /^Result: FAIL - early-fail failed at t=11\.4s \(run time 15\.2s\)$/m);
+    assert.match(stdout, /^Reproduce: node runner\/run\.mjs --dry-run --base main --seed 7$/m);
+  });
+
+  for (const [signal, exitCode] of /** @type {const} */ ([
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ])) {
+    test(`${signal} during the sleep stops the run at once with exit code ${exitCode} and no summary`, async () => {
+      const repo = await makeRepo();
+      await repo.branch('feature');
+      await repo.commit('add', { 'directives/slow.json': directive('slow', { durationSec: 300 }) });
+      // Seed 1 has a duration factor of 0.77, so the run would sleep for 231s.
+      const result = await signalDuringSleep(process.execPath, [RUN, '--base', 'main', '--seed', '1'], {
+        cwd: repo.dir,
+        env: { GITHUB_STEP_SUMMARY: repo.summary },
+        signal,
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.equal(result.code, exitCode, output);
+      assert.ok(result.msToExit < 2000, `exited ${result.msToExit}ms after ${signal}`);
+      assert.match(
+        result.stdout,
+        new RegExp(`^Run cancelled \\(${signal}\\) at t=\\d+(\\.\\d)?s of 231s; exiting without a result\\.$`, 'm'),
+      );
+      assert.doesNotMatch(result.stdout, /^Result:/m);
+      assert.doesNotMatch(result.stdout, /::error/);
+      assert.equal(existsSync(repo.summary), false, 'no job summary is written');
+    });
+  }
+
+  test('under the workflow shell, SIGINT sent only to the shell stops the runner because the step uses exec', async () => {
+    // The Actions runner runs the step as `bash -e <script>` and signals only that process.
+    assert.match(readFileSync(WORKFLOW, 'utf8'), /^ {6}- run: exec node runner\/run\.mjs /m);
+    const repo = await makeRepo();
+    await repo.branch('feature');
+    await repo.commit('add', { 'directives/slow.json': directive('slow', { durationSec: 300 }) });
+    const script = join(dirname(repo.dir), 'step.sh');
+    writeFileSync(script, `exec "${process.execPath}" "${RUN}" --base main --seed 1\n`);
+    const result = await signalDuringSleep('bash', ['-e', script], {
+      cwd: repo.dir,
+      env: { GITHUB_STEP_SUMMARY: repo.summary },
+      signal: 'SIGINT',
+    });
+    assert.equal(result.code, 130, `${result.stdout}\n${result.stderr}`);
+    assert.ok(result.msToExit < 2000, `exited ${result.msToExit}ms after SIGINT`);
+    assert.match(result.stdout, /^Run cancelled \(SIGINT\) at t=\d+(\.\d)?s of 231s; exiting without a result\.$/m);
+    assert.equal(existsSync(repo.summary), false, 'no job summary is written');
   });
 
   test('a missing base ref exits non-zero with the fetch-depth hint', async () => {

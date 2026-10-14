@@ -18,4 +18,6 @@ jobs:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0, persist-credentials: false }
       - run: node --test runner/*.test.mjs
-      - run: node runner/run.mjs --base "origin/${{ github.base_ref || 'main' }}" ${{ github.event_name == 'pull_request' && '--max-seconds 5' || '' }}
+      # On cancel, the Actions runner signals only the shell's process. exec replaces the shell with
+      # node, so node gets the signal and stops, instead of sleeping on as an orphan.
+      - run: exec node runner/run.mjs --base "origin/${{ github.base_ref || 'main' }}" ${{ github.event_name == 'pull_request' && '--max-seconds 5' || '' }}

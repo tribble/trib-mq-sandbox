@@ -8,9 +8,19 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
+import { constants } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
-import { describeFailure, evaluate, mulberry32, parseDirective, seedFromRun } from './rules.mjs';
+import {
+  applyDurationFactor,
+  describeFailure,
+  durationFactor,
+  evaluate,
+  formatSeconds,
+  mulberry32,
+  parseDirective,
+  seedFromRun,
+} from './rules.mjs';
 
 /** @typedef {import('./rules.mjs').Directive} Directive */
 /** @typedef {import('./rules.mjs').Evaluation} Evaluation */
@@ -19,7 +29,8 @@ const USAGE = [
   'Usage: node runner/run.mjs [--base origin/main] [--dry-run] [--seed N] [--time-scale 1] [--max-seconds N]',
   '  --base <ref>         branch to compare against (default origin/main)',
   '  --dry-run            print the results table and exit by the outcome; no sleep, no summary',
-  '  --seed <n>           flake seed, an integer 0..4294967295 (default: from GITHUB_RUN_ID, else random)',
+  '  --seed <n>           seed for the flake rolls and the duration factor, an integer 0..4294967295',
+  '                       (default: from GITHUB_RUN_ID, else random)',
   '  --time-scale <x>     real seconds per simulated second, >= 0 (default 1; 0 = no sleep)',
   '  --max-seconds <n>    cap the sleep at n simulated seconds, >= 0 (the outcome is unchanged)',
 ].join('\n');
@@ -248,12 +259,7 @@ function oneLine(text) {
 
 /** @param {number | null} at */
 function formatAt(at) {
-  return at === null ? '-' : `${at}s`;
-}
-
-/** @param {number} seconds */
-function formatSeconds(seconds) {
-  return `${Number(seconds.toFixed(1))}s`;
+  return at === null ? '-' : formatSeconds(at);
 }
 
 /**
@@ -358,10 +364,13 @@ async function main(argv, env) {
     seedSource = 'random';
   }
   const reproduce = `node runner/run.mjs --dry-run --base ${opts.base} --seed ${seed}`;
+  const factor = durationFactor(seed);
+  const factorNote = '(from the seed; scales every durationSec)';
 
   console.log(`Base: ${opts.base}`);
   if (!opts.dryRun) console.log(`Merge-base: ${mergeBase}`);
   console.log(`Seed: ${seed} (${seedSource})`);
+  console.log(`Duration factor: ${factor.toFixed(2)} ${factorNote}`);
 
   const files = readPresent(root);
   /** @type {string[]} */
@@ -418,6 +427,7 @@ async function main(argv, env) {
   /** @type {string[]} */
   const summaryInfo = [
     `- Seed: \`${seed}\` (${seedSource})`,
+    `- Duration factor: \`${factor.toFixed(2)}\` ${factorNote}`,
     `- Base: \`${opts.base}\`, merge-base \`${mergeBase}\``,
   ];
 
@@ -451,11 +461,11 @@ async function main(argv, env) {
     return 1;
   }
 
-  const evaluation = evaluate({ active, present, rng: mulberry32(seed) });
+  const evaluation = applyDurationFactor(evaluate({ active, present, rng: mulberry32(seed) }), factor);
   const failureText = describeFailure(evaluation);
   const resultLine = evaluation.ok
-    ? `Result: PASS at t=${evaluation.endsAt}s`
-    : `Result: FAIL - ${failureText} (run time ${evaluation.runTime}s)`;
+    ? `Result: PASS at t=${formatSeconds(evaluation.endsAt)}`
+    : `Result: FAIL - ${failureText} (run time ${formatSeconds(evaluation.runTime)})`;
 
   const printResults = () => {
     console.log('');
@@ -477,18 +487,45 @@ async function main(argv, env) {
   const capped = target < evaluation.endsAt;
   const capNote = capped ? `sleep capped at ${formatSeconds(target)}; outcome unchanged` : null;
   const realMs = target * opts.timeScale * 1000;
+
+  // To cancel a run, the Actions runner sends SIGINT and then SIGTERM to the step's process, which
+  // is this one because the workflow starts it with exec. A cancelled run has no result, so it
+  // writes no job summary.
+  const cancel = new AbortController();
+  const onSignal = (/** @type {NodeJS.Signals} */ signal) => cancel.abort(signal);
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+
   console.log(
     `Simulating ${formatSeconds(target)} at time scale ${opts.timeScale} (${formatSeconds(realMs / 1000)} real)`,
   );
   if (capNote) {
-    console.log(`${capNote} (--max-seconds ${opts.maxSeconds}; the outcome is due at t=${evaluation.endsAt}s)`);
+    console.log(
+      `${capNote} (--max-seconds ${opts.maxSeconds}; the outcome is due at t=${formatSeconds(evaluation.endsAt)})`,
+    );
   }
+  const startedAt = Date.now();
   let elapsedMs = 0;
-  while (elapsedMs < realMs) {
-    const step = Math.min(HEARTBEAT_MS, realMs - elapsedMs);
-    await sleep(step);
-    elapsedMs += step;
-    console.log(`t=${formatSeconds(elapsedMs / 1000 / opts.timeScale)} of ${formatSeconds(target)}`);
+  try {
+    while (elapsedMs < realMs) {
+      const step = Math.min(HEARTBEAT_MS, realMs - elapsedMs);
+      await sleep(step, undefined, { signal: cancel.signal });
+      elapsedMs += step;
+      console.log(`t=${formatSeconds(elapsedMs / 1000 / opts.timeScale)} of ${formatSeconds(target)}`);
+    }
+    // A signal that arrives after the last sleep has ended still cancels the run.
+    cancel.signal.throwIfAborted();
+  } catch (err) {
+    if (!cancel.signal.aborted) throw err;
+    const signal = /** @type {NodeJS.Signals} */ (cancel.signal.reason);
+    const simulated = Math.min(target, (Date.now() - startedAt) / 1000 / opts.timeScale);
+    console.log(
+      `Run cancelled (${signal}) at t=${formatSeconds(simulated)} of ${formatSeconds(target)}; exiting without a result.`,
+    );
+    return 128 + constants.signals[signal];
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 
   printResults();
@@ -500,8 +537,8 @@ async function main(argv, env) {
       `## Sandbox CI: ${evaluation.ok ? 'pass' : 'fail'}`,
       '',
       evaluation.ok
-        ? `Passed at t=${evaluation.endsAt}s.`
-        : `${failureText} (run time ${evaluation.runTime}s).`,
+        ? `Passed at t=${formatSeconds(evaluation.endsAt)}.`
+        : `${failureText} (run time ${formatSeconds(evaluation.runTime)}).`,
       '',
       ...summaryInfo,
     ];

@@ -3,13 +3,17 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  applyDurationFactor,
   describeFailure,
+  durationFactor,
   evaluate,
   fnv1a,
+  formatSeconds,
   formatSpec,
   mulberry32,
   NO_ACTIVE_NOTE,
   parseDirective,
+  scaleSeconds,
   seedFromRun,
   validate,
 } from './rules.mjs';
@@ -549,6 +553,123 @@ describe('seeded randomness', () => {
     assert.deepEqual(rollsFor('9876543210', '1'), rollsFor('9876543210', '1'));
     assert.notDeepEqual(rollsFor('9876543210', '1'), rollsFor('9876543210', '2'));
     assert.notDeepEqual(rollsFor('9876543210', '1'), rollsFor('9876543211', '1'));
+  });
+});
+
+describe('duration factor', () => {
+  const SEEDS = Array.from({ length: 10_000 }, (_, i) => fnv1a(`seed-${i}`));
+
+  test('the same seed always gives the same factor', () => {
+    for (const seed of SEEDS.slice(0, 100)) assert.equal(durationFactor(seed), durationFactor(seed));
+    // The README's examples use these seeds.
+    assert.equal(durationFactor(7), 0.76);
+    assert.equal(durationFactor(1), 0.77);
+  });
+
+  test('different attempts of the same run get different factors', () => {
+    const runId = '38471945802';
+    assert.equal(durationFactor(seedFromRun(runId, 1)), durationFactor(seedFromRun(runId, '1')));
+    assert.notEqual(durationFactor(seedFromRun(runId, 1)), durationFactor(seedFromRun(runId, 2)));
+    assert.notEqual(durationFactor(seedFromRun('9876543210', 1)), durationFactor(seedFromRun('9876543210', 2)));
+  });
+
+  test('the factor is a two-decimal number in [0.5, 1.0] and the whole range is used', () => {
+    const factors = SEEDS.map(durationFactor);
+    for (const factor of factors) {
+      assert.ok(factor >= 0.5 && factor <= 1, `${factor} out of range`);
+      assert.equal(factor, Number(factor.toFixed(2)), `${factor} has more than two decimals`);
+    }
+    assert.equal(new Set(factors).size, 51);
+    const mean = factors.reduce((sum, f) => sum + f, 0) / factors.length;
+    assert.ok(Math.abs(mean - 0.75) < 0.01, `mean ${mean} is not near 0.75`);
+  });
+
+  test('the flake rolls are exactly what they were before the duration factor existed', () => {
+    // First three rolls per seed, recorded from mulberry32 before the duration factor was added.
+    /** @type {Array<[number, number[]]>} */
+    const recorded = [
+      [1, [0.6270739405881613, 0.002735721180215478, 0.5274470399599522]],
+      [7, [0.011704753153026104, 0.06195825757458806, 0.97690763277933]],
+      [424242, [0.1287079993635416, 0.23631658218801022, 0.18376533640548587]],
+    ];
+    for (const [seed, rolls] of recorded) {
+      durationFactor(seed);
+      const rng = mulberry32(seed);
+      assert.deepEqual([rng(), rng(), rng()], rolls, `seed ${seed}`);
+    }
+    // The README's flake example: seed 7 flakes and seed 1 passes.
+    const examples = [
+      d('conflict', { durationSec: 10, conflictKey: 'demo' }),
+      d('flake', { outcome: 'flake', flakeRate: 0.3, durationSec: 45 }),
+      d('pass', { durationSec: 20 }),
+    ];
+    assert.equal(rowsById(run(examples, [], mulberry32(7))).flake.result, 'flaked (roll 0.01 < 0.30)');
+    assert.equal(rowsById(run(examples, [], mulberry32(1))).flake.result, 'passed (roll 0.63 >= 0.30)');
+  });
+
+  test('the factor does not track the first flake roll of the same seed', () => {
+    // A factor taken from the flake stream would correlate perfectly with its first roll.
+    const rolls = SEEDS.map((seed) => mulberry32(seed)());
+    const factors = SEEDS.map(durationFactor);
+    const mean = (/** @type {number[]} */ xs) => xs.reduce((sum, x) => sum + x, 0) / xs.length;
+    const [mr, mf] = [mean(rolls), mean(factors)];
+    let cov = 0;
+    let vr = 0;
+    let vf = 0;
+    rolls.forEach((r, i) => {
+      cov += (r - mr) * (factors[i] - mf);
+      vr += (r - mr) ** 2;
+      vf += (factors[i] - mf) ** 2;
+    });
+    const correlation = cov / Math.sqrt(vr * vf);
+    assert.ok(Math.abs(correlation) < 0.05, `correlation ${correlation}`);
+  });
+
+  test('scaleSeconds is exact to the hundredth and formatSeconds shows one decimal', () => {
+    assert.equal(scaleSeconds(45, 0.73), 32.85);
+    assert.equal(scaleSeconds(600, 0.57), 342);
+    assert.equal(scaleSeconds(1, 0.5), 0.5);
+    assert.equal(scaleSeconds(37, 1), 37);
+    assert.deepEqual(
+      [0, 45, 22.5, 32.85, 342, 0.5].map(formatSeconds),
+      ['0s', '45s', '22.5s', '32.9s', '342s', '0.5s'],
+    );
+  });
+
+  test('a failing run fails the same way, only at durationSec x factor', () => {
+    const active = [
+      d('b-fail', { outcome: 'fail', durationSec: 15 }),
+      d('a-fail', { outcome: 'fail', durationSec: 15 }),
+      d('flake', { outcome: 'flake', flakeRate: 0.3, durationSec: 15 }),
+      d('pair', { durationSec: 12, breaksWith: ['late'] }),
+      d('late', { durationSec: 40 }),
+      d('quick', { durationSec: 7 }),
+    ];
+    const base = run(active, [], seq(0.1));
+    // a-fail wins the tie at 15s against b-fail and the flake. The pair would only break at 40s.
+    assert.deepEqual(base.failure, { kind: 'fail', ids: ['a-fail'], with: [], at: 15 });
+    for (const factor of [0.5, 0.62, 0.73, 1]) {
+      const scaled = applyDurationFactor(base, factor);
+      assert.equal(scaled.ok, false);
+      assert.deepEqual(scaled.failure, { ...base.failure, at: scaleSeconds(15, factor) });
+      assert.ok(/** @type {number} */ (scaled.failure?.at) <= 15);
+      assert.equal(scaled.endsAt, scaleSeconds(15, factor));
+      assert.equal(scaled.runTime, scaleSeconds(40, factor));
+      assert.deepEqual(
+        scaled.rows.map((r) => [r.id, r.spec, r.result, r.status, r.at]),
+        base.rows.map((r) => [r.id, r.spec, r.result, r.status, r.at === null ? null : scaleSeconds(r.at, factor)]),
+      );
+      assert.equal(describeFailure(scaled), `a-fail failed at t=${formatSeconds(scaleSeconds(15, factor))}`);
+    }
+    assert.equal(describeFailure(applyDurationFactor(base, 0.62)), 'a-fail failed at t=9.3s');
+    assert.equal(describeFailure(applyDurationFactor(base, 0.5)), 'a-fail failed at t=7.5s');
+    // The input evaluation is left as it was.
+    assert.equal(base.endsAt, 15);
+  });
+
+  test('a passing run with no active directives stays at t=0', () => {
+    const scaled = applyDurationFactor(run([]), 0.6);
+    assert.deepEqual([scaled.ok, scaled.endsAt, scaled.runTime, scaled.failure, scaled.note], [true, 0, 0, null, NO_ACTIVE_NOTE]);
   });
 });
 
