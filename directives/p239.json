@@ -1,0 +1,7 @@
+{
+  "id": "p239",
+  "title": "Enforce upload size limits",
+  "durationSec": 45,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
