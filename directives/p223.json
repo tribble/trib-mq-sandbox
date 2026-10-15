@@ -1,0 +1,7 @@
+{
+  "id": "p223",
+  "title": "Set cache headers on static assets",
+  "durationSec": 45,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
