@@ -1,0 +1,7 @@
+{
+  "id": "p237",
+  "title": "Log out of all devices",
+  "durationSec": 41,
+  "outcome": "flake",
+  "flakeRate": 0.5
+}
