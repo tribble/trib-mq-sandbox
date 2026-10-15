@@ -1,0 +1,7 @@
+{
+  "id": "p234",
+  "title": "Retry declined card payments once",
+  "durationSec": 60,
+  "outcome": "flake",
+  "flakeRate": 0.4
+}
