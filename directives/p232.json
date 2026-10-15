@@ -1,0 +1,7 @@
+{
+  "id": "p232",
+  "title": "Notify users when mentioned",
+  "durationSec": 56,
+  "outcome": "flake",
+  "flakeRate": 0.3
+}
